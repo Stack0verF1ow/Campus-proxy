@@ -1,0 +1,2 @@
+127.0.0.1 - - [09/Sep/2025 16:27:16] code 403, message Access Denied: Your IP is not allowed
+127.0.0.1 - - [09/Sep/2025 16:27:16] "GET http://httpbin.org/get HTTP/1.1" 403 -
