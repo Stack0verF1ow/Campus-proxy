@@ -1,10 +1,9 @@
-# -*- coding: utf-8 -*-
 import sys
 import os
 import socket
 import ssl
 import select
-import http.client as httplib
+import http.client
 import urllib.parse as urlparse
 import threading
 import gzip
@@ -13,27 +12,100 @@ import time
 import json
 import re
 import base64
-import hashlib
+import configparser
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from io import StringIO, BytesIO
 from subprocess import Popen, PIPE
 from html.parser import HTMLParser
 
-# 配置参数
-PROXY_PORT = 8080  # 代理服务器端口
-ALTERNATIVE_PORTS = [8081, 8082, 8088, 8888, 9999]
-ALLOWED_NETWORKS = ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16','127.0.0.0/8']  # 允许访问的校园网段
-ADMIN_USERNAME = 'admin'  # 管理用户名
-ADMIN_PASSWORD = 'securepassword'  # 管理密码
-ACCESS_LOG = 'proxy_access.log'  # 访问日志文件
+# 添加新导入
+import sqlite3
+import win32serviceutil
+import win32service
+import win32event
+import win32api
+import requests
+
+# 配置管理
+CONFIG_FILE = 'proxy_config.ini'
+config = configparser.ConfigParser()
+config.read(CONFIG_FILE)
+
+# 数据库初始化
+def init_db():
+    conn = sqlite3.connect('proxy_users.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users
+                 (id INTEGER PRIMARY KEY, username TEXT, password TEXT, token TEXT, permissions TEXT)''')
+    conn.commit()
+    conn.close()
+
+def with_color(c, s):
+    return "\x1b[%dm%s\x1b[0m" % (c, s)
+
+
+def join_with_script_dir(path):
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), path)
+
+
+# 用户认证类
+class AuthManager:
+    def __init__(self):
+        self.failed_attempts = {}
+        self.lock = threading.Lock()
+
+    def authenticate(self, auth_header):
+        # 实现基本认证和令牌认证
+        pass
+
+    def is_allowed(self, user, url):
+        # 检查用户是否有权限访问该URL
+        pass
+
+
+# Windows服务封装
+class CampusProxyService(win32serviceutil.ServiceFramework):
+    _svc_name_ = 'CampusProxy'
+    _svc_display_name_ = '校园代理服务'
+    _svc_description_ = '提供通过公网访问校园内网资源的代理服务'
+
+    def __init__(self, args):
+        win32serviceutil.ServiceFramework.__init__(self, args)
+        self.hWaitStop = win32event.CreateEvent(None, 0, 0, None)
+        self.is_alive = True
+
+    def SvcStop(self):
+        self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
+        win32event.SetEvent(self.hWaitStop)
+        self.is_alive = False
+
+    def SvcDoRun(self):
+        # 初始化数据库
+        init_db()
+
+        # 启动代理服务器
+        self.ReportServiceStatus(win32service.SERVICE_RUNNING)
+        test(HandlerClass=CampusProxyRequestHandler)
+
+
+# DDNS更新函数
+def update_ddns():
+    # 获取公网IP并更新DNS记录
+    try:
+        ip = requests.get('https://api.ipify.org').text
+        # 这里使用示例服务，实际替换为您的DDNS提供商API
+        requests.get(f"https://ddns.example.com/update?hostname=yourcampusproxy.com&ip={ip}")
+    except Exception as e:
+        print(f"DDNS update failed: {str(e)}")
 
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
-    address_family = socket.AF_INET
+    address_family = socket.AF_INET6
     daemon_threads = True
 
     def handle_error(self, request, client_address):
+        # surpress socket/ssl related errors
         cls, e = sys.exc_info()[:2]
         if cls is socket.error or cls is ssl.SSLError:
             pass
@@ -42,78 +114,27 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
 
 
 class ProxyRequestHandler(BaseHTTPRequestHandler):
-    cakey = 'ca.key'
-    cacert = 'ca.crt'
-    certkey = 'cert.key'
-    certdir = 'certs/'
+    cakey = join_with_script_dir('ca.key')
+    cacert = join_with_script_dir('ca.crt')
+    certkey = join_with_script_dir('cert.key')
+    certdir = join_with_script_dir('certs/')
     timeout = 5
     lock = threading.Lock()
-
-    # 添加访问控制列表
-    allowed_ips = []
-    for network in ALLOWED_NETWORKS:
-        ip, mask = network.split('/')
-        mask = int(mask)
-        allowed_ips.append((ip, mask))
 
     def __init__(self, *args, **kwargs):
         self.tls = threading.local()
         self.tls.conns = {}
+
         BaseHTTPRequestHandler.__init__(self, *args, **kwargs)
 
-    def log_message(self, format, *args):
-        # 记录到文件和控制台
-        message = "%s - - [%s] %s\n" % (self.client_address[0],
-                                        self.log_date_time_string(),
-                                        format % args)
-        sys.stderr.write(message)
-        with open(ACCESS_LOG, 'a') as f:
-            f.write(message)
+    def log_error(self, format, *args):
+        # surpress "Request timed out: timeout('timed out',)"
+        if isinstance(args[0], socket.timeout):
+            return
 
-    def check_ip_permission(self):
-        """检查客户端IP是否在允许的校园网段内"""
-        client_ip = self.client_address[0]
-        for allowed_ip, mask in self.allowed_ips:
-            if self.is_ip_in_subnet(client_ip, allowed_ip, mask):
-                return True
-        return False
-
-    def is_ip_in_subnet(self, ip, subnet, mask):
-        """检查IP是否在指定子网内"""
-        ip = self.ip_to_int(ip)
-        subnet = self.ip_to_int(subnet)
-        return (ip & ((1 << mask) - 1 << (32 - mask))) == subnet
-
-    def ip_to_int(self, ip):
-        """将IP地址转换为整数"""
-        parts = ip.split('.')
-        return (int(parts[0]) << 24) + (int(parts[1]) << 16) + (int(parts[2]) << 8) + int(parts[3])
-
-    def authenticate(self):
-        """基本身份验证"""
-        auth_header = self.headers.get('Proxy-Authorization', '')
-        if not auth_header.startswith('Basic '):
-            return False
-
-        auth_decoded = base64.b64decode(auth_header[6:]).decode('utf-8')
-        username, password = auth_decoded.split(':', 1)
-
-        # 在实际应用中，这里应该查询数据库或配置文件
-        return username == ADMIN_USERNAME and password == ADMIN_PASSWORD
+        self.log_message(format, *args)
 
     def do_CONNECT(self):
-        # IP访问控制
-        if not self.check_ip_permission():
-            self.send_error(403, "Access Denied: Your IP is not allowed")
-            return
-
-        # 身份验证
-        if not self.authenticate():
-            self.send_response(407)
-            self.send_header('Proxy-Authenticate', 'Basic realm="Campus Proxy"')
-            self.end_headers()
-            return
-
         if os.path.isfile(self.cakey) and os.path.isfile(self.cacert) and os.path.isfile(
                 self.certkey) and os.path.isdir(self.certdir):
             self.connect_intercept()
@@ -171,18 +192,6 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 other.sendall(data)
 
     def do_GET(self):
-        # IP访问控制
-        if not self.check_ip_permission():
-            self.send_error(403, "Access Denied: Your IP is not allowed")
-            return
-
-        # 身份验证
-        if not self.authenticate():
-            self.send_response(407)
-            self.send_header('Proxy-Authenticate', 'Basic realm="Campus Proxy"')
-            self.end_headers()
-            return
-
         if self.path == 'http://proxy2.test/':
             self.send_cacert()
             return
@@ -216,9 +225,9 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             origin = (scheme, netloc)
             if not origin in self.tls.conns:
                 if scheme == 'https':
-                    self.tls.conns[origin] = httplib.HTTPSConnection(netloc, timeout=self.timeout)
+                    self.tls.conns[origin] = http.client.HTTPSConnection(netloc, timeout=self.timeout)
                 else:
-                    self.tls.conns[origin] = httplib.HTTPConnection(netloc, timeout=self.timeout)
+                    self.tls.conns[origin] = http.client.HTTPConnection(netloc, timeout=self.timeout)
             conn = self.tls.conns[origin]
             conn.request(self.command, path, req_body, dict(req.headers))
             res = conn.getresponse()
@@ -259,8 +268,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
 
         status_line = f"{self.protocol_version} {res.status} {res.reason}\r\n"
         self.wfile.write(status_line.encode())
-        for header in res.headers._headers:
-            self.wfile.write(f"{header[0]}: {header[1]}\r\n".encode())
+        for line in res.headers._headers:
+            self.wfile.write(line)
         self.end_headers()
         self.wfile.write(res_body)
         self.wfile.flush()
@@ -271,8 +280,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
     def relay_streaming(self, res):
         status_line = f"{self.protocol_version} {res.status} {res.reason}\r\n"
         self.wfile.write(status_line.encode())
-        for header in res.headers._headers:
-            self.wfile.write(f"{header[0]}: {header[1]}\r\n".encode())
+        for line in res.headers._headers:
+            self.wfile.write(line)
         self.end_headers()
         try:
             while True:
@@ -294,9 +303,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
     def filter_headers(self, headers):
         # http://tools.ietf.org/html/rfc2616#section-13.5.1
         hop_by_hop = (
-            'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailers',
-            'transfer-encoding',
-            'upgrade')
+        'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailers', 'transfer-encoding',
+        'upgrade')
         for k in hop_by_hop:
             if k in headers:
                 del headers[k]
@@ -367,24 +375,24 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         req_header_text = "%s %s %s\n%s" % (req.command, req.path, req.request_version, req.headers)
         res_header_text = "%s %d %s\n%s" % (res.response_version, res.status, res.reason, res.headers)
 
-        print(f"[{time.ctime()}] Client: {self.client_address[0]}")
-        print(req_header_text)
+        print(with_color(33, req_header_text))
 
         u = urlparse.urlsplit(req.path)
         if u.query:
             query_text = parse_qsl(u.query)
-            print("==== QUERY PARAMETERS ====\n%s\n" % query_text)
+            print(with_color(32, "==== QUERY PARAMETERS ====\n%s\n" % query_text))
 
         cookie = req.headers.get('Cookie', '')
         if cookie:
             cookie = parse_qsl(re.sub(r';\s*', '&', cookie))
-            print("==== COOKIE ====\n%s\n" % cookie)
+            print(with_color(32, "==== COOKIE ====\n%s\n" % cookie))
 
         auth = req.headers.get('Authorization', '')
         if auth.lower().startswith('basic'):
             token = auth.split()[1]
+            import base64
             token = base64.b64decode(token).decode('utf-8')
-            print("==== BASIC AUTH ====\n%s\n" % token)
+            print(with_color(31, "==== BASIC AUTH ====\n%s\n" % token))
 
         if req_body is not None:
             req_body_text = None
@@ -411,9 +419,9 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 req_body_text = req_body
 
             if req_body_text:
-                print("==== REQUEST BODY ====\n%s\n" % req_body_text)
+                print(with_color(32, "==== REQUEST BODY ====\n%s\n" % req_body_text))
 
-        print(res_header_text)
+        print(with_color(36, res_header_text))
 
         cookies = res.headers.get_all('Set-Cookie') if hasattr(res.headers, 'get_all') else res.headers.get(
             'Set-Cookie', [])
@@ -421,7 +429,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             if isinstance(cookies, str):
                 cookies = [cookies]
             cookies = '\n'.join(cookies)
-            print("==== SET-COOKIE ====\n%s\n" % cookies)
+            print(with_color(31, "==== SET-COOKIE ====\n%s\n" % cookies))
 
         if res_body is not None:
             res_body_text = None
@@ -448,59 +456,212 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 m = re.search(r'<title[^>]*>\s*([^<]+?)\s*</title>', res_body_str, re.I)
                 if m:
                     h = HTMLParser()
-                    print("==== HTML TITLE ====\n%s\n" % h.unescape(m.group(1)))
+                    print(with_color(32, "==== HTML TITLE ====\n%s\n" % h.unescape(m.group(1))))
             elif content_type.startswith('text/') and len(res_body) < 1024:
                 res_body_text = res_body
 
             if res_body_text:
                 if isinstance(res_body_text, bytes):
                     res_body_text = res_body_text.decode('utf-8', errors='ignore')
-                print("==== RESPONSE BODY ====\n%s\n" % res_body_text)
+                print(with_color(32, "==== RESPONSE BODY ====\n%s\n" % res_body_text))
 
     def request_handler(self, req, req_body):
-        # 可以在这里添加请求处理逻辑
-        return req_body
+        pass
 
     def response_handler(self, req, req_body, res, res_body):
-        # 可以在这里添加响应处理逻辑
-        return res_body
+        pass
 
     def save_handler(self, req, req_body, res, res_body):
         self.print_info(req, req_body, res, res_body)
 
+# 修改后的代理请求处理类
+class CampusProxyRequestHandler(ProxyRequestHandler):
+    # 新增配置项
+    ADMIN_TOKEN = config.get('security', 'admin_token', fallback='default_token')
+    ALLOWED_DOMAINS = json.loads(config.get('access', 'allowed_domains', fallback='[]'))
+    MAX_FAILED_ATTEMPTS = config.getint('security', 'max_failed_attempts', fallback=5)
+    BLOCK_TIME = config.getint('security', 'block_time', fallback=300)  # 5分钟
 
-def test(HandlerClass=ProxyRequestHandler, ServerClass=ThreadingHTTPServer, protocol="HTTP/1.1"):
-    ports_to_try = [PROXY_PORT] + ALTERNATIVE_PORTS
-    httpd = None
+    # 初始化认证管理器
+    auth_manager = AuthManager()
 
-    for port in ports_to_try:
-        try:
-            server_address = ('0.0.0.0', port)
-            HandlerClass.protocol_version = protocol
-            httpd = ServerClass(server_address, HandlerClass)
-            sa = httpd.socket.getsockname()
-            print(f"Serving HTTP Proxy on {sa[0]} port {sa[1]} ...")
-            print(f"Allowed networks: {', '.join(ALLOWED_NETWORKS)}")
-            print(f"Admin username: {ADMIN_USERNAME}")
-            print(f"Access log: {ACCESS_LOG}")
-            break
-        except OSError as e:
-            if e.errno == 10013:  # 权限错误
-                print(f"Port {port} is blocked. Trying next port...")
-            else:
-                print(f"Error binding to port {port}: {e}")
-                continue
+    def setup(self):
+        # 添加客户端IP记录
+        self.client_ip = self.client_address[0]
+        super().setup()
 
-    if httpd is None:
-        print("Failed to bind to any available port. Exiting.")
-        return
+    def handle_one_request(self):
+        # 添加访问频率限制
+        if self.is_client_blocked():
+            self.send_error(429, "Too Many Requests")
+            return
+        super().handle_one_request()
 
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        print("\nProxy server shutting down...")
-        httpd.server_close()
+    def is_client_blocked(self):
+        # 检查客户端是否因多次失败被暂时封禁
+        pass
+
+    def do_CONNECT(self):
+        # 添加认证检查
+        if not self.check_auth():
+            self.send_auth_challenge()
+            return
+        super().do_CONNECT()
+
+    def do_GET(self):
+        # 特殊API端点处理
+        if self.path.startswith('/proxy-api/'):
+            self.handle_api_request()
+            return
+
+        # 添加认证检查
+        if not self.check_auth():
+            self.send_auth_challenge()
+            return
+
+        # 添加访问控制
+        if not self.is_url_allowed(self.path):
+            self.send_error(403, "Forbidden: Access to this resource is restricted")
+            return
+
+        super().do_GET()
+
+    # 其他HTTP方法同样需要添加认证和访问控制
+    do_HEAD = do_GET
+    do_POST = do_GET
+    do_PUT = do_GET
+    do_DELETE = do_GET
+    do_OPTIONS = do_GET
+
+    def check_auth(self):
+        # 实现认证逻辑
+        auth_header = self.headers.get('Proxy-Authorization', '')
+        return self.auth_manager.authenticate(auth_header)
+
+    def send_auth_challenge(self):
+        # 发送认证质询
+        self.send_response(407)
+        self.send_header('Proxy-Authenticate', 'Basic realm="Campus Proxy"')
+        self.end_headers()
+
+    def is_url_allowed(self, url):
+        # 检查URL是否在允许的校园资源范围内
+        domain = urlparse.urlparse(url).netloc.split(':')[0]
+        return any(allowed in domain for allowed in self.ALLOWED_DOMAINS)
+
+    def handle_api_request(self):
+        # 处理管理API请求
+        if self.path == '/proxy-api/config':
+            self.handle_config_api()
+        elif self.path == '/proxy-api/users':
+            self.handle_users_api()
+        # 其他API端点...
+
+    def handle_config_api(self):
+        # 需要管理员权限
+        if not self.is_admin_request():
+            self.send_error(403)
+            return
+
+        # 返回当前配置
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        config_data = {
+            'allowed_domains': self.ALLOWED_DOMAINS,
+            'max_connections': config.getint('server', 'max_connections', fallback=100)
+        }
+        self.wfile.write(json.dumps(config_data).encode())
+
+    def handle_users_api(self):
+        # 用户管理API实现
+        pass
+
+    def is_admin_request(self):
+        # 检查请求是否来自管理员
+        return self.headers.get('X-Admin-Token') == self.ADMIN_TOKEN
+
+    def request_handler(self, req, req_body):
+        # 移动端优化：压缩请求处理
+        if 'mobile' in req.headers.get('User-Agent', '').lower():
+            # 特殊处理移动端请求
+            pass
+        return super().request_handler(req, req_body)
+
+    def response_handler(self, req, req_body, res, res_body):
+        # 移动端优化：压缩响应
+        if 'mobile' in req.headers.get('User-Agent', '').lower():
+            # 添加移动端优化处理
+            pass
+        return super().response_handler(req, req_body, res, res_body)
+
+    def save_handler(self, req, req_body, res, res_body):
+        # 添加审计日志
+        self.log_access(req, res)
+        super().save_handler(req, req_body, res, res_body)
+
+    def log_access(self, req, res):
+        # 记录访问日志到数据库
+        log_entry = {
+            'timestamp': time.time(),
+            'client_ip': self.client_ip,
+            'method': req.command,
+            'url': req.path,
+            'status': res.status,
+            'user_agent': req.headers.get('User-Agent', ''),
+            'username': self.get_authenticated_user()
+        }
+        # 保存到数据库或文件
+        pass
+
+    def get_authenticated_user(self):
+        # 获取当前认证用户
+        return "anonymous"  # 实际从认证信息中获取
+
+
+
+
+def test(HandlerClass=CampusProxyRequestHandler, ServerClass=ThreadingHTTPServer, protocol="HTTP/1.1"):
+    port = config.getint('server', 'port', fallback=8080)
+    server_address = ('::', port)  # 监听所有接口
+
+    # 启用HTTPS
+    use_https = config.getboolean('security', 'https', fallback=False)
+    certfile = config.get('security', 'certfile', fallback='server.crt')
+    keyfile = config.get('security', 'keyfile', fallback='server.key')
+
+    HandlerClass.protocol_version = protocol
+    httpd = ServerClass(server_address, HandlerClass)
+
+    if use_https:
+        httpd.socket = ssl.wrap_socket(
+            httpd.socket,
+            certfile=certfile,
+            keyfile=keyfile,
+            server_side=True
+        )
+
+    # 启动DDNS更新线程
+    if config.getboolean('network', 'ddns_enabled', fallback=False):
+        ddns_thread = threading.Thread(target=ddns_update_loop, daemon=True)
+        ddns_thread.start()
+
+    sa = httpd.socket.getsockname()
+    print(f"Serving Campus Proxy on {sa[0]} port {sa[1]}...")
+    httpd.serve_forever()
+
+# DDNS更新循环
+def ddns_update_loop():
+    interval = config.getint('network', 'ddns_interval', fallback=3600)  # 1小时
+    while True:
+        update_ddns()
+        time.sleep(interval)
 
 
 if __name__ == '__main__':
-    test()
+    # 作为Windows服务运行或直接启动
+    if len(sys.argv) == 1:
+        # 直接运行
+        test()
+    else:
+        win32serviceutil.HandleCommandLine(CampusProxyService)

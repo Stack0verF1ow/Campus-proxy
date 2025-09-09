@@ -1,2 +1,8 @@
 127.0.0.1 - - [09/Sep/2025 16:27:16] code 403, message Access Denied: Your IP is not allowed
 127.0.0.1 - - [09/Sep/2025 16:27:16] "GET http://httpbin.org/get HTTP/1.1" 403 -
+127.0.0.1 - - [09/Sep/2025 21:50:30] code 502, message Bad Gateway
+127.0.0.1 - - [09/Sep/2025 21:50:30] "GET http://httpbin.org/get HTTP/1.1" 502 -
+127.0.0.1 - - [09/Sep/2025 22:00:52] code 502, message Bad Gateway
+127.0.0.1 - - [09/Sep/2025 22:00:52] "GET http://httpbin.org/get HTTP/1.1" 502 -
+127.0.0.1 - - [09/Sep/2025 22:15:22] code 502, message Bad Gateway
+127.0.0.1 - - [09/Sep/2025 22:15:22] "GET http://httpbin.org/get HTTP/1.1" 502 -
