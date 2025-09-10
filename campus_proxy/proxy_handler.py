@@ -1,19 +1,7 @@
-import socket
 import ssl
-import select
-import http.client
-import urllib.parse as urlparse
 import threading
 import os
-import gzip
-import zlib
-import time
-import json
-import re
 from http.server import BaseHTTPRequestHandler
-from io import BytesIO
-from subprocess import Popen, PIPE
-from html.parser import HTMLParser
 
 from config_manager import ConfigManager
 from auth_manager import AuthManager
