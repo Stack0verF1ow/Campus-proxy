@@ -83,7 +83,9 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                             "-set_serial", epoch, "-out", certpath], stdin=p1.stdout, stderr=PIPE)
                 p2.communicate()
 
-        self.wfile.write("%s %d %s\r\n" % (self.protocol_version, 200, 'Connection Established').encode())
+        # 使用标准方法发送 CONNECT 响应
+        self.send_response(200, 'Connection Established')
+        self.send_header('Proxy-Connection', 'keep-alive')
         self.end_headers()
 
         self.connection = ssl.wrap_socket(self.connection, keyfile=self.certkey, certfile=certpath, server_side=True)
@@ -196,10 +198,10 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
 
         setattr(res, 'headers', self.filter_headers(res.headers))
 
-        status_line = f"{self.protocol_version} {res.status} {res.reason}\r\n"
-        self.wfile.write(status_line.encode())
-        for line in res.headers._headers:
-            self.wfile.write(line)
+        self.send_response(res.status, res.reason)
+        # 使用正确的头部发送方法
+        for key, value in res.headers.items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(res_body)
         self.wfile.flush()
@@ -208,10 +210,14 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             self.save_handler(req, req_body, res, res_body_plain)
 
     def relay_streaming(self, res):
-        status_line = f"{self.protocol_version} {res.status} {res.reason}\r\n"
-        self.wfile.write(status_line.encode())
-        for line in res.headers._headers:
-            self.wfile.write(line)
+        # 使用标准方法发送状态行
+        self.send_response(res.status, res.reason)
+
+        # 使用标准方法发送头部
+        for key, value in res.headers.items():
+            self.send_header(key, value)
+
+        # 结束头部
         self.end_headers()
         try:
             while True:
@@ -291,7 +297,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         with open(self.cacert, 'rb') as f:
             data = f.read()
 
-        self.wfile.write("%s %d %s\r\n" % (self.protocol_version, 200, 'OK').encode())
+        self.send_response(200, 'OK')
         self.send_header('Content-Type', 'application/x-x509-ca-cert')
         self.send_header('Content-Length', str(len(data)))
         self.send_header('Connection', 'close')

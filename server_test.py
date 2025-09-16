@@ -1,9 +1,14 @@
 import requests
 import time
 
+headers = {
+        'ngrok-skip-browser-warning': 'true',  # 跳过 ngrok 的浏览器警告
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'  # 模拟浏览器
+    }
+
 proxies = {
-    'http': 'http://admin:securepassword@localhost:8080',
-    'https': 'http://admin:securepassword@localhost:8080'
+    'http': 'http://localhost:8080',
+    # 'https': 'https://bca2a33cfef4.ngrok-free.app'
 }
 
 
@@ -12,7 +17,10 @@ def test_proxy():
     for attempt in range(max_retries):
         try:
             print(f"尝试 #{attempt + 1}...")
-            response = requests.get('http://phoenix.stu.edu.cn/bt/default.aspx', proxies=proxies, timeout=10)
+            response = requests.get('http://phoenix.stu.edu.cn/bt/default.aspx',
+                                    proxies=proxies,
+                                    timeout=10,
+                                    headers=headers)
 
             if response.status_code == 200:
                 print("代理测试成功！")

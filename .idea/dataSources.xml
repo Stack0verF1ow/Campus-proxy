@@ -8,5 +8,12 @@
       <jdbc-url>jdbc:sqlite:D:\workplace\网络工程\campus_proxy\proxy_users.db</jdbc-url>
       <working-dir>$ProjectFileDir$</working-dir>
     </data-source>
+    <data-source source="LOCAL" name="user" uuid="95ba688d-d927-4df8-8d36-bcfd2948c04a">
+      <driver-ref>sqlite.xerial</driver-ref>
+      <synchronize>true</synchronize>
+      <jdbc-driver>org.sqlite.JDBC</jdbc-driver>
+      <jdbc-url>jdbc:sqlite:D:\workplace\网络工程\client\data\user.db</jdbc-url>
+      <working-dir>$ProjectFileDir$</working-dir>
+    </data-source>
   </component>
 </project>
